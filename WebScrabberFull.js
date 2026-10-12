@@ -2,7 +2,7 @@
 // @name         Web Scrabber [Full Version]
 // @description  Advanced client-side activity logger (Network, Events, Storage State) and recursive script dependency crawler.
 // @author       airmagicty
-// @version      1.0.0
+// @version      2.1.0
 // @license      MIT
 // ==UserScript==
 
@@ -45,8 +45,18 @@
         snapshotInRequests: true,  // галочка: cookies/storage в каждый сетевой запрос
         consoleLog: true,          // галочка: дублировать лог в консоль браузера
         // группы шумных событий: true = записывать. По умолчанию все выключены
-        noise: { scroll: false, emptyClick: false, pointer: false, focus: false, select: false, keyLow: false, hover: false }
+        noise: { scroll: false, emptyClick: false, pointer: false, focus: false, select: false, keyLow: false, hover: false },
+        // группы шумных сетевых запросов (трекеры, метрики): true = записывать. По умолчанию все выключены
+        noiseNet: { metrika: false, analytics: false, mailru: false, sentry: false, other: false },
+        compact: true,             // галочка: сжимать экспорт (шапка с повторами, повторы подряд, дельты состояния)
+        eventsTotal: 0,            // сколько событий произошло всего (с учётом повторов подряд)
+        networkTotal: 0,           // сколько запросов выполнено всего (с учётом повторов подряд)
+        _evtSig: null, _netSig: null  // сигнатуры последних записей — для схлопывания повторов подряд
     };
+
+    // элементы панели и таймер отрисовки объявлены заранее: scheduleRender() может вызваться во время загрузки скрипта
+    const ui = {};
+    let renderTimer = null;
 
     // вывод в консоль, включается/выключается галочкой в панели
     const clog = (...a) => { if (S.consoleLog) console.log(...a); };
@@ -56,6 +66,11 @@
     const sleep = ms => new Promise(r => setTimeout(r, ms));
     const clip = (v, n = CFG.maxValueChars) =>
         (typeof v === 'string' && v.length > n) ? v.slice(0, n) + `…[+${v.length - n} симв.]` : v;
+
+    const jsonReplacer = (k, v) => typeof v === 'bigint' ? v.toString() + 'n' : v;
+    const absUrl = u => { try { return new URL(u, location.href).href; } catch (e) { return String(u); } };
+    function hashStr(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return h; }
+    const hashVal = v => { try { const s = JSON.stringify(v); return s === undefined ? '' : s.length + ':' + hashStr(s); } catch (e) { return ''; } };
 
     // оригинальные функции (чтобы краулер не попадал в собственный лог)
     const origFetch = window.fetch ? window.fetch.bind(window) : null;
@@ -277,8 +292,61 @@
         return '[не сериализуемое тело]';
     }
 
+    // Группы шумных сетевых запросов (трекеры, метрики). Включаются галочками в панели, по умолчанию выключены.
+    const NET_NOISE = {
+        metrika: {
+            label: 'Яндекс Метрика',
+            test: (h, u) => /(^|\.)mc\.yandex\.[a-z.]+$/.test(h) || /(^|\.)(mc\.)?webvisor\.com$/.test(h)
+                || /(^|\.)metrika\.yandex\.[a-z.]+$/.test(h)
+                || (/(^|\.)yandex\.[a-z.]+$/.test(h) && /^\/(clck|metrika|watch)\//.test(u.pathname))
+        },
+        analytics: {
+            label: 'Google Analytics / Tag Manager',
+            test: (h, u) => /(^|\.)(google-analytics\.com|analytics\.google\.com|googletagmanager\.com|doubleclick\.net|googlesyndication\.com)$/.test(h)
+                || (/(^|\.)google\.[a-z.]+$/.test(h) && /^\/(g\/collect|ccm\/collect|pagead\/)/.test(u.pathname))
+        },
+        mailru: {
+            label: 'Top.Mail.ru / VK / счётчики',
+            test: h => /(^|\.)(top-fwz\d*\.mail\.ru|top\.mail\.ru|counter\.yadro\.ru|tns-counter\.ru|mediascope\.net)$/.test(h)
+        },
+        sentry: {
+            label: 'Sentry (ошибки и телеметрия)',
+            test: (h, u) => /sentry/i.test(h) || /sentry_(key|version)=/.test(u.search) || /\/api\/\d+\/(envelope|store)\/?$/.test(u.pathname)
+        },
+        other: {
+            label: 'Прочие трекеры (hotjar, clarity, FB…)',
+            test: (h, u) => /(^|\.)(hotjar\.(com|io)|clarity\.ms|mixpanel\.com|segment\.(io|com)|amplitude\.com|fullstory\.com|bat\.bing\.com|connect\.facebook\.net|adfox\.ru|tiktok\.com)$/.test(h)
+                || (/(^|\.)facebook\.com$/.test(h) && /^\/tr\/?/.test(u.pathname))
+        }
+    };
+    function netNoiseGroup(url) {
+        try {
+            const u = new URL(url, location.href), h = u.hostname.toLowerCase();
+            for (const k in NET_NOISE) if (NET_NOISE[k].test(h, u)) return k;
+        } catch (e) {}
+        return null;
+    }
+    // true, если запрос относится к выключенной группе шума (такие запросы вообще не логируются)
+    const netSkip = url => { const g = netNoiseGroup(url); return !!g && !S.noiseNet[g]; };
+
+    // сигнатура запроса для схлопывания повторов подряд
+    function netSig(e) {
+        return [e.type, e.method, e.url, e.responseStatus, e.error || '', hashVal(e.requestBody), hashVal(e.responseBody)].join('|');
+    }
+
     function pushNetwork(entry) {
-        S.network.push(entry);
+        S.networkTotal++;
+        const sig = netSig(entry);
+        const last = S.network[S.network.length - 1];
+        if (last && S._netSig === sig) {
+            // такой же запрос подряд: только увеличиваем счётчик
+            last.repeat = (last.repeat || 1) + 1;
+            last.lastSeq = Math.max(last.lastSeq || last.seq, entry.seq);
+            last.lastStartedAt = entry.startedAt;
+        } else {
+            S.network.push(entry);
+            S._netSig = sig;
+        }
         clog(`[WebScrabberFull][net] ${entry.method || ''} ${entry.url} -> ${entry.responseStatus ?? ''}`);
         scheduleRender();
     }
@@ -286,11 +354,14 @@
     // ------------------------------------------------------------------ сеть: fetch
     if (origFetch) {
         window.fetch = function (input, init) {
+            try { // запросы выключенных групп шума пропускаем без записи
+                if (netSkip((typeof Request !== 'undefined' && input instanceof Request) ? input.url : String(input))) return origFetch(input, init);
+            } catch (e) {}
             const seq = nextSeq(), t0 = performance.now(), startedAt = now();
             let url = '', method = 'GET', reqHeaders = {}, credentials, bodyP = Promise.resolve(null);
             try {
                 const isReq = typeof Request !== 'undefined' && input instanceof Request;
-                url = isReq ? input.url : String(input);
+                url = absUrl(isReq ? input.url : String(input));
                 method = (init && init.method) || (isReq ? input.method : 'GET');
                 reqHeaders = normHeaders((init && init.headers) || (isReq ? input.headers : null));
                 credentials = (init && init.credentials) || (isReq ? input.credentials : undefined);
@@ -344,7 +415,7 @@
         const xOpen = XP.open, xSend = XP.send, xSet = XP.setRequestHeader;
 
         XP.open = function (method, url) {
-            this.__sf = { method: String(method).toUpperCase(), url: String(url), headers: {} };
+            this.__sf = { method: String(method).toUpperCase(), url: absUrl(url), headers: {} };
             return xOpen.apply(this, arguments);
         };
         XP.setRequestHeader = function (k, v) {
@@ -353,7 +424,7 @@
         };
         XP.send = function (body) {
             const m = this.__sf, xhr = this;
-            if (m) {
+            if (m && !netSkip(m.url)) {
                 m.seq = nextSeq();
                 m.t0 = performance.now();
                 m.startedAt = now();
@@ -391,9 +462,10 @@
     if (navigator.sendBeacon) {
         const ob = navigator.sendBeacon.bind(navigator);
         navigator.sendBeacon = function (url, data) {
+            if (netSkip(String(url))) return ob(url, data);
             pushNetwork({
                 seq: nextSeq(), startedAt: now(), type: 'BEACON', method: 'POST',
-                url: String(url), pageUrl: location.href, requestBody: describeBody(data),
+                url: absUrl(url), pageUrl: location.href, requestBody: describeBody(data),
                 requestState: S.snapshotInRequests ? stateSnapshot() : undefined
             });
             return ob(url, data);
@@ -406,6 +478,7 @@
             construct(target, args, newTarget) {
                 const ws = Reflect.construct(target, args, newTarget);
                 const url = String(args[0]);
+                if (netSkip(url)) return ws;
                 const log = (direction, data) => pushNetwork({
                     seq: nextSeq(), startedAt: now(), type: 'WS', method: direction, url,
                     pageUrl: location.href,
@@ -425,7 +498,8 @@
 
     // ------------------------------------------------------------------ события
     const OWN_UI_ID = '__sf_panel';
-    const isOwnUi = t => t instanceof Element && !!t.closest('#' + OWN_UI_ID);
+    // элементы самого скрипта (панель и временная ссылка скачивания) в логи не попадают
+    const isOwnUi = t => t instanceof Element && !!t.closest('#' + OWN_UI_ID + ',[data-sf-own]');
 
     // Группы шумных событий. Каждая включается отдельной галочкой в панели (по умолчанию выключены).
     const NOISE_GROUPS = {
@@ -553,6 +627,32 @@
         return rec;
     }
 
+    // Сигнатура события для схлопывания повторов подряд. Координаты мыши, позиция скролла и время не учитываются.
+    function eventSig(r) {
+        const { seq, timestamp, mouse, scroll, wheel, lastSeq, lastTimestamp, repeat, ...rest } = r;
+        if (mouse) rest._m = [mouse.button, mouse.ctrl, mouse.shift, mouse.alt, mouse.meta].join();
+        return JSON.stringify(rest);
+    }
+
+    function pushEvent(rec) {
+        S.eventsTotal++;
+        const sig = eventSig(rec);
+        const last = S.events[S.events.length - 1];
+        if (last && S._evtSig === sig) {
+            // то же событие подряд: увеличиваем счётчик, запоминаем последнее вхождение
+            last.repeat = (last.repeat || 1) + 1;
+            last.lastSeq = rec.seq;
+            last.lastTimestamp = rec.timestamp;
+            if (rec.mouse) last.mouse = rec.mouse;      // координаты мыши — последние
+            if (rec.scroll) last.scroll = rec.scroll;   // позиция скролла — последняя
+            if (rec.wheel && last.wheel) last.wheel = { dx: last.wheel.dx + rec.wheel.dx, dy: last.wheel.dy + rec.wheel.dy }; // колесо — сумма
+        } else {
+            S.events.push(rec);
+            S._evtSig = sig;
+        }
+        scheduleRender();
+    }
+
     function onEvent(e) {
         const t = e.target;
         if (isOwnUi(t)) return;
@@ -564,8 +664,7 @@
             if (n - (lastFire[e.type] || 0) < CFG.throttleMs) return;
             lastFire[e.type] = n;
         }
-        S.events.push(describeEvent(e));
-        scheduleRender();
+        pushEvent(describeEvent(e));
         if (STATE_TRIGGERS.has(e.type)) scheduleStateCheck('event ' + e.type);
     }
 
@@ -585,12 +684,11 @@
         EventTarget.prototype.dispatchEvent = function (ev) {
             try {
                 if (ev && !listened.has(ev.type) && !noiseOff(ev.type) && !isOwnUi(this)) {
-                    S.events.push({
+                    pushEvent({
                         seq: nextSeq(), timestamp: now(), type: ev.type, source: 'dispatchEvent',
                         isTrusted: false, target: describeTarget(this),
                         detail: safe(ev.detail), pageUrl: location.href
                     });
-                    scheduleRender();
                 }
             } catch (e) {}
             return od.call(this, ev);
@@ -601,12 +699,11 @@
     ['pushState', 'replaceState'].forEach(fn => {
         const orig = history[fn];
         history[fn] = function (state, title, url) {
-            S.events.push({
+            pushEvent({
                 seq: nextSeq(), timestamp: now(), type: 'history.' + fn, isTrusted: false,
                 target: { kind: 'history' }, state: safe(state), url: url === undefined ? null : String(url),
                 pageUrl: location.href
             });
-            scheduleRender();
             const r = orig.apply(this, arguments);
             scheduleStateCheck('history.' + fn);
             return r;
@@ -620,48 +717,217 @@
         const a = document.createElement('a');
         a.href = url;
         a.download = name;
+        a.setAttribute('data-sf-own', '1'); // чтобы клик по этой ссылке не попал в лог событий
         document.body.appendChild(a);
         a.click();
         a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 10000);
     }
-    const toJson = o => JSON.stringify(o, (k, v) => typeof v === 'bigint' ? v.toString() + 'n' : v, 2);
     const stamp = () => Date.now();
 
-    function downloadList(arr, prefix, emptyMsg) {
-        if (!arr.length) { alert(emptyMsg); return; }
-        download(`${prefix}_${stamp()}.json`, toJson(arr));
-    }
-    const downloadNetworkLogs = () => downloadList(S.network, 'network_logs', 'Сетевых логов пока нет.');
-    const downloadEventLogs = () => downloadList(S.events, 'event_logs', 'Событий пока нет.');
-    const downloadStateLogs = () => downloadList(S.state, 'state_logs', 'Изменений состояния пока нет.');
+    // ------------------------------------------------------------------ сжатие логов при экспорте
+    // Идея: в самих записях остаётся только уникальное, а всё повторяющееся выносится в шапку (header):
+    //   1) заголовки, одинаковые у всех запросов одного origin  -> header.commonHeaders
+    //   2) cookies/storage в запросах: полный снимок только у первого (header.stateBase), дальше stateDiff
+    //   3) адреса своего origin пишутся без домена; pageUrl — только при смене
+    //   4) любые длинные строки, встречающиеся 2+ раза, -> "@N" и таблица header.dict
+    // <compact>
+    const REF_RE = /^@\d+$/;
+    const NET_TYPES = new Set(['FETCH', 'XHR', 'BEACON', 'WS']);
+    const isNetRec = r => r.log === 'network' || NET_TYPES.has(r.type);
 
-    function downloadFullSession() {
-        checkState('export');
-        const timeline = []
-            .concat(S.network.map(x => ({ log: 'network', ...x })))
-            .concat(S.events.map(x => ({ log: 'event', ...x })))
-            .concat(S.state.map(x => ({ log: 'state', ...x })))
-            .sort((a, b) => a.seq - b.seq);
-        const out = {
-            meta: {
-                tool: 'WebScrabberFull',
-                howToRead: 'timeline отсортирован по seq (хронология). log=network: сетевые запросы '
-                    + '(seq = момент начала запроса; requestState = cookies/storage в этот момент); '
-                    + 'log=event: JS-события (isTrusted=true — реальное действие пользователя, false — вызвано скриптом); '
-                    + 'log=state: изменения cookies/localStorage/sessionStorage (reason = что их вызвало). '
-                    + 'Пароли в полях type=password замаскированы. HttpOnly-куки из JS не видны.',
-                startedAt: S.startedAt, exportedAt: now(), pageUrl: location.href, title: document.title,
-                referrer: document.referrer, userAgent: navigator.userAgent, language: navigator.language,
-                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-                viewport: { w: innerWidth, h: innerHeight }, screen: { w: screen.width, h: screen.height },
-                counts: { network: S.network.length, events: S.events.length, state: S.state.length },
-                noiseGroupsRecorded: S.noise // false = события этой группы НЕ записывались (см. NOISE_GROUPS)
-            },
-            timeline
-        };
-        download(`full_session_${stamp()}.json`, toJson(out));
+    function mapDeep(v, f) {
+        if (Array.isArray(v)) return v.map(x => mapDeep(x, f));
+        if (v && typeof v === 'object') {
+            const o = {};
+            for (const k in v) o[k] = mapDeep(v[k], f);
+            return o;
+        }
+        return f(v);
     }
+
+    function originOf(u) { try { return new URL(u).origin; } catch (e) { return null; } }
+
+    // 1) общие заголовки по origin (запись без поля = «нет заголовков сверх общих»)
+    function factorHeaders(records, field, common) {
+        const groups = {};
+        records.forEach(r => {
+            if (!isNetRec(r) || typeof r.url !== 'string') return;
+            const o = originOf(r.url);
+            if (o) (groups[o] = groups[o] || []).push(r);
+        });
+        Object.keys(groups).forEach(o => {
+            const g = groups[o];
+            if (g.length < 2) return;
+            const first = g[0][field] || {}, same = {};
+            Object.keys(first).forEach(k => { if (g.every(r => r[field] && r[field][k] === first[k])) same[k] = first[k]; });
+            if (!Object.keys(same).length) return;
+            (common[o] = common[o] || {})[field] = same;
+            g.forEach(r => {
+                const rest = {};
+                Object.keys(r[field]).forEach(k => { if (!(k in same)) rest[k] = r[field][k]; });
+                r[field] = rest;
+            });
+        });
+    }
+
+    // 2) cookies/localStorage/sessionStorage в запросах: база + изменения относительно предыдущего запроса
+    function chainState(records, header) {
+        let prev = null;
+        records.forEach(r => {
+            if (!isNetRec(r) || !r.requestState) return;
+            const cur = r.requestState;
+            delete r.requestState;
+            if (!prev) header.stateBase = cur;
+            else {
+                const d = {};
+                ['cookies', 'localStorage', 'sessionStorage'].forEach(a => {
+                    const ch = diffArea(prev[a] || {}, cur[a] || {});
+                    if (ch.length) d[a] = ch;
+                });
+                if (Object.keys(d).length) r.stateDiff = d;
+            }
+            prev = cur;
+        });
+    }
+
+    // 3) адреса своего origin без домена; pageUrl только при смене
+    function shortenUrls(records, origin) {
+        const strip = v => {
+            if (typeof v !== 'string' || !v.startsWith(origin)) return v;
+            let rest = v.slice(origin.length);
+            if (rest && '/?#'.indexOf(rest[0]) < 0) return v; // это другой домен (origin — только префикс)
+            if (rest[0] !== '/') rest = '/' + rest;
+            return rest;
+        };
+        let prevPage = null;
+        records.forEach(r => {
+            ['url', 'responseUrl', 'pageUrl', 'oldURL', 'newURL'].forEach(k => { if (typeof r[k] === 'string') r[k] = strip(r[k]); });
+            if (r.target) ['href', 'src'].forEach(k => { if (typeof r.target[k] === 'string') r.target[k] = strip(r.target[k]); });
+            if (r.form && typeof r.form.action === 'string') r.form.action = strip(r.form.action);
+            if (r.pageUrl !== undefined) {
+                if (r.pageUrl === prevPage) delete r.pageUrl; else prevPage = r.pageUrl;
+            }
+        });
+    }
+
+    // 4) повторяющиеся длинные строки -> ссылки "@N"
+    function dedupeStrings(data) {
+        const count = new Map();
+        mapDeep(data, v => {
+            if (typeof v === 'string' && (v.length >= 24 || REF_RE.test(v))) count.set(v, (count.get(v) || 0) + 1);
+            return v;
+        });
+        const ids = new Map(), dict = {};
+        let n = 0;
+        count.forEach((c, s) => {
+            // строки, похожие на ссылку, обязательно уходят в словарь, чтобы их нельзя было спутать со ссылкой
+            if (REF_RE.test(s) || (c - 1) * s.length > c * 6 + 8) {
+                const id = '@' + (++n);
+                ids.set(s, id);
+                dict[id] = s;
+            }
+        });
+        return { data: mapDeep(data, v => (typeof v === 'string' && ids.has(v)) ? ids.get(v) : v), dict };
+    }
+
+    function compactRecords(recordsIn, origin) {
+        const records = JSON.parse(JSON.stringify(recordsIn, jsonReplacer)); // глубокая копия: оригинальные логи не трогаем
+        const header = {}, common = {};
+        factorHeaders(records, 'requestHeaders', common);
+        factorHeaders(records, 'responseHeaders', common);
+        records.forEach(r => ['requestHeaders', 'responseHeaders'].forEach(f => {
+            if (r[f] && typeof r[f] === 'object' && !Object.keys(r[f]).length) delete r[f];
+        }));
+        chainState(records, header);
+        if (Object.keys(common).length) header.commonHeaders = common;
+        shortenUrls(records, origin);
+        const res = dedupeStrings({ header, records });
+        if (Object.keys(res.dict).length) res.data.header.dict = res.dict;
+        return res.data;
+    }
+    // </compact>
+
+    const KIND_FILE = { network: 'network_logs', events: 'event_logs', state: 'state_logs', full: 'full_session' };
+    const KIND_EMPTY = {
+        network: () => S.network.length, events: () => S.events.length, state: () => S.state.length
+    };
+    const KIND_EMPTY_MSG = {
+        network: 'Сетевых логов пока нет.', events: 'Событий пока нет.', state: 'Изменений состояния пока нет.'
+    };
+
+    function exportMeta(kind) {
+        const compact = S.compact;
+        const guide = [
+            'records отсортированы по seq (хронология). seq/timestamp — первое вхождение записи.',
+            'repeat = сколько раз подряд повторилась такая же запись (если поля нет — 1); lastSeq/lastTimestamp/lastStartedAt — последнее вхождение; '
+            + 'у повторов mouse и scroll — последние значения, wheel — суммарный сдвиг. Время и счётчик нужны, чтобы видеть темп действий.',
+            'isTrusted=true — реальное действие пользователя, false — вызвано скриптом сайта.',
+            'log=network — сетевые запросы, log=event — JS-события, log=state — изменения cookies/localStorage/sessionStorage (reason — что их вызвало); '
+            + 'у log=network в requestState/stateBase — состояние в момент запроса.'
+        ];
+        if (compact) {
+            guide.push(
+                'Сжатие: (1) строка вида "@N" — ссылка на header.dict["@N"]; '
+                + '(2) адрес, начинающийся с "/", относится к pageOrigin; '
+                + '(3) pageUrl указан только там, где он изменился относительно предыдущей записи; '
+                + '(4) header.stateBase — cookies/localStorage/sessionStorage у первого запроса, stateDiff — изменения относительно предыдущего запроса '
+                + '(нет stateDiff — состояние то же); '
+                + '(5) header.commonHeaders[origin].requestHeaders/responseHeaders — заголовки, общие для всех запросов этого origin; '
+                + 'у записи указаны только отличающиеся (нет поля — только общие).'
+            );
+        }
+        guide.push('Поля type=password, одноразовые коды и данные карт замаскированы. HttpOnly-cookies из JS не видны. '
+            + 'recordedGroups: false = события/запросы этой группы не записывались (шум отключён).');
+        return {
+            tool: 'WebScrabberFull', kind, startedAt: S.startedAt, exportedAt: now(),
+            pageOrigin: location.origin, pageUrl: location.href, title: document.title,
+            referrer: document.referrer, userAgent: navigator.userAgent, language: navigator.language,
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            viewport: { w: innerWidth, h: innerHeight }, screen: { w: screen.width, h: screen.height },
+            counts: {
+                network: { total: S.networkTotal, withoutConsecutiveRepeats: S.network.length },
+                events: { total: S.eventsTotal, withoutConsecutiveRepeats: S.events.length },
+                state: S.state.length
+            },
+            recordedGroups: { events: { ...S.noise }, network: { ...S.noiseNet } },
+            howToRead: guide
+        };
+    }
+
+    // собирает текст файла экспорта: kind = network | events | state | full
+    function buildExport(kind) {
+        checkState('export');
+        let recs;
+        if (kind === 'network') recs = S.network;
+        else if (kind === 'events') recs = S.events;
+        else if (kind === 'state') recs = S.state;
+        else {
+            recs = []
+                .concat(S.network.map(x => ({ log: 'network', ...x })))
+                .concat(S.events.map(x => ({ log: 'event', ...x })))
+                .concat(S.state.map(x => ({ log: 'state', ...x })))
+                .sort((a, b) => a.seq - b.seq);
+        }
+        const meta = exportMeta(kind);
+        const name = `${KIND_FILE[kind]}_${stamp()}.json`;
+        if (!S.compact) return { name, text: JSON.stringify({ meta, records: recs }, jsonReplacer, 2) };
+        const { header, records } = compactRecords(recs, location.origin);
+        const text = '{\n"meta": ' + JSON.stringify(meta, jsonReplacer, 2)
+            + ',\n"header": ' + JSON.stringify(header, jsonReplacer, 1)
+            + ',\n"records": [\n' + records.map(r => JSON.stringify(r)).join(',\n') + '\n]\n}\n';
+        return { name, text };
+    }
+
+    function downloadKind(kind) {
+        if (KIND_EMPTY[kind] && !KIND_EMPTY[kind]()) { alert(KIND_EMPTY_MSG[kind]); return; }
+        const { name, text } = buildExport(kind);
+        download(name, text);
+    }
+    const downloadNetworkLogs = () => downloadKind('network');
+    const downloadEventLogs = () => downloadKind('events');
+    const downloadStateLogs = () => downloadKind('state');
+    const downloadFullSession = () => downloadKind('full');
 
     function clearAll() {
         if (!confirm('Очистить все логи?')) return;
@@ -669,6 +935,9 @@
         S.events.length = 0;
         S.state.length = 0;
         S.depsCount = 0;
+        S.eventsTotal = 0;
+        S.networkTotal = 0;
+        S._evtSig = S._netSig = null;
         prevState = stateSnapshot();
         render();
     }
@@ -821,8 +1090,6 @@
     }
 
     // ------------------------------------------------------------------ панель управления
-    const ui = {};
-    let renderTimer = null;
 
     function scheduleRender() {
         if (renderTimer) return;
@@ -830,8 +1097,8 @@
     }
     function render() {
         if (!ui.panel) return;
-        ui.net.textContent = S.network.length;
-        ui.evt.textContent = S.events.length;
+        ui.net.textContent = `${S.networkTotal} / ${S.network.length}`;   // все / без повторов подряд
+        ui.evt.textContent = `${S.eventsTotal} / ${S.events.length}`;
         ui.st.textContent = S.state.length;
         ui.dep.textContent = S.crawling ? `${S.depsCount}…` : S.depsCount;
         ui.depBtn.disabled = S.crawling;
@@ -840,7 +1107,7 @@
     function createPanel() {
         const style = document.createElement('style');
         style.textContent = `
-            #${OWN_UI_ID}{position:fixed;bottom:16px;right:16px;z-index:2147483647;width:270px;
+            #${OWN_UI_ID}{position:fixed;bottom:16px;right:16px;z-index:2147483647;width:290px;
                 font:13px/1.3 system-ui,sans-serif;background:#1e2128;color:#e8eaf0;border-radius:10px;
                 box-shadow:0 6px 24px rgba(0,0,0,.35);padding:10px;box-sizing:border-box}
             #${OWN_UI_ID} *{box-sizing:border-box;font:inherit}
@@ -854,25 +1121,31 @@
             #${OWN_UI_ID} label{display:flex;gap:6px;align-items:center;margin:2px 0 4px;cursor:pointer;color:#c9cdd8}
             #${OWN_UI_ID} details{margin:0 0 6px 4px;padding-left:8px;border-left:2px solid #3a3f4b}
             #${OWN_UI_ID} summary{cursor:pointer;color:#c9cdd8;margin-bottom:4px}
+            #${OWN_UI_ID} .sf-legend{font-size:11px;color:#98a0b3;margin:-4px 0 8px}
             #${OWN_UI_ID} .sf-body.sf-hidden{display:none}`;
         document.head.appendChild(style);
 
         const noiseHtml = Object.keys(NOISE_GROUPS).map(k =>
             `<label><input type="checkbox" data-n="${k}"> ${NOISE_GROUPS[k].label}</label>`).join('');
+        const netNoiseHtml = Object.keys(NET_NOISE).map(k =>
+            `<label><input type="checkbox" data-nn="${k}"> ${NET_NOISE[k].label}</label>`).join('');
 
         const p = document.createElement('div');
         p.id = OWN_UI_ID;
         p.innerHTML = `
             <div class="sf-title"><span>WebScrabberFull</span><span class="sf-toggle">—</span></div>
             <div class="sf-body">
-                <button data-a="net">💾 Логи сети <span class="sf-badge" data-c="net">0</span></button>
-                <button data-a="evt">💾 Логи событий <span class="sf-badge" data-c="evt">0</span></button>
-                <details><summary>Шумные события (все выкл.)</summary>${noiseHtml}</details>
+                <div class="sf-legend">счётчики: все / без повторов подряд</div>
+                <button data-a="net" title="всего запросов / записей без повторов подряд">💾 Логи сети <span class="sf-badge" data-c="net">0 / 0</span></button>
+                <details data-d="net"><summary>Шум сети (все выкл.)</summary>${netNoiseHtml}</details>
+                <button data-a="evt" title="всего событий / записей без повторов подряд">💾 Логи событий <span class="sf-badge" data-c="evt">0 / 0</span></button>
+                <details data-d="evt"><summary>Шумные события (все выкл.)</summary>${noiseHtml}</details>
                 <button data-a="st" class="sf-alt">💾 Cookies / storage <span class="sf-badge" data-c="st">0</span></button>
                 <button data-a="dep">🌐 Скачать зависимости <span class="sf-badge" data-c="dep">0</span></button>
                 <label><input type="checkbox" data-o="includeCss"> включать CSS в зависимости</label>
                 <button data-a="all" class="sf-alt">📦 Всё в один JSON</button>
                 <label><input type="checkbox" data-o="snapshotInRequests" checked> cookies/storage в каждый запрос</label>
+                <label><input type="checkbox" data-o="compact" checked> сжимать логи (шапка с повторами)</label>
                 <label><input type="checkbox" data-o="consoleLog" checked> лог в консоль браузера</label>
                 <button data-a="clear" class="sf-danger">🗑 Очистить</button>
             </div>`;
@@ -895,11 +1168,17 @@
         });
         p.addEventListener('change', e => {
             const ds = e.target.dataset || {};
+            const sum = (d, obj, title) => {             // заголовок раскрывающегося блока: сколько групп включено
+                const on = Object.keys(obj).filter(k => obj[k]).length;
+                p.querySelector(`details[data-d=${d}] summary`).textContent = on ? `${title} (вкл.: ${on})` : `${title} (все выкл.)`;
+            };
             if (ds.n) {                                  // галочка группы шумных событий
                 S.noise[ds.n] = e.target.checked;
                 attachEventListeners();                  // дописать слушатели для включённых групп
-                const on = Object.keys(S.noise).filter(k => S.noise[k]).length;
-                p.querySelector('summary').textContent = on ? `Шумные события (вкл.: ${on})` : 'Шумные события (все выкл.)';
+                sum('evt', S.noise, 'Шумные события');
+            } else if (ds.nn) {                          // галочка группы шума сети
+                S.noiseNet[ds.nn] = e.target.checked;
+                sum('net', S.noiseNet, 'Шум сети');
             } else if (ds.o) {
                 S[ds.o] = e.target.checked;
             }
@@ -917,7 +1196,7 @@
 
     window.__webScrabberFull = {
         state: S, downloadNetworkLogs, downloadEventLogs, downloadStateLogs,
-        collectDeps, downloadFullSession, clearAll
+        collectDeps, downloadFullSession, clearAll, buildExport, compactRecords
     };
     clog('[WebScrabberFull] запущен');
 })();
