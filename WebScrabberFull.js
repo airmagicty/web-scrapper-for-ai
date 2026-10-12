@@ -43,8 +43,13 @@
         crawling: false,
         includeCss: false,         // галочка: собирать CSS
         snapshotInRequests: true,  // галочка: cookies/storage в каждый сетевой запрос
-        includeNoisy: false        // галочка: шумные события (mousemove и т.п.)
+        consoleLog: true,          // галочка: дублировать лог в консоль браузера
+        // группы шумных событий: true = записывать. По умолчанию все выключены
+        noise: { scroll: false, emptyClick: false, pointer: false, focus: false, select: false, keyLow: false, hover: false }
     };
+
+    // вывод в консоль, включается/выключается галочкой в панели
+    const clog = (...a) => { if (S.consoleLog) console.log(...a); };
 
     const nextSeq = () => ++S.seq;
     const now = () => new Date().toISOString();
@@ -274,7 +279,7 @@
 
     function pushNetwork(entry) {
         S.network.push(entry);
-        console.log(`[WebScrabberFull][net] ${entry.method || ''} ${entry.url} -> ${entry.responseStatus ?? ''}`);
+        clog(`[WebScrabberFull][net] ${entry.method || ''} ${entry.url} -> ${entry.responseStatus ?? ''}`);
         scheduleRender();
     }
 
@@ -422,16 +427,45 @@
     const OWN_UI_ID = '__sf_panel';
     const isOwnUi = t => t instanceof Element && !!t.closest('#' + OWN_UI_ID);
 
-    const NOISY = new Set([
-        'mousemove', 'pointermove', 'pointerrawupdate', 'mouseover', 'mouseout', 'mouseenter', 'mouseleave',
-        'pointerover', 'pointerout', 'pointerenter', 'pointerleave', 'touchmove', 'drag', 'dragover',
-        'dragenter', 'dragleave', 'selectionchange', 'timeupdate', 'progress', 'loadeddata', 'loadedmetadata',
-        'loadstart', 'durationchange', 'canplay', 'canplaythrough', 'seeking', 'seeked', 'playing', 'waiting',
-        'stalled', 'suspend', 'emptied', 'ratechange', 'volumechange', 'animationstart', 'animationend',
-        'animationiteration', 'animationcancel', 'transitionstart', 'transitionend', 'transitionrun',
-        'transitioncancel', 'devicemotion', 'deviceorientation', 'deviceorientationabsolute', 'beforeinput',
-        'gamepadconnected', 'gamepaddisconnected'
-    ]);
+    // Группы шумных событий. Каждая включается отдельной галочкой в панели (по умолчанию выключены).
+    const NOISE_GROUPS = {
+        scroll: { label: 'Скролл и колесо мыши', types: ['scroll', 'scrollend', 'wheel'] },
+        emptyClick: { label: 'Клики «в никуда» (не по кнопке/ссылке/полю)', types: [] }, // особый случай, см. isEmptyClick
+        pointer: { label: 'Нажатия мыши (pointer/mouse down/up)', types: ['pointerdown', 'pointerup', 'pointercancel', 'mousedown', 'mouseup'] },
+        focus: { label: 'Фокус (focus / blur)', types: ['focus', 'blur', 'focusin', 'focusout'] },
+        select: { label: 'Выделение текста', types: ['selectstart', 'select', 'selectionchange'] },
+        keyLow: { label: 'keyup / keypress (оставляя keydown)', types: ['keyup', 'keypress'] },
+        hover: {
+            label: 'Движение мыши, drag, медиа, анимации',
+            types: [
+                'mousemove', 'pointermove', 'pointerrawupdate', 'mouseover', 'mouseout', 'mouseenter', 'mouseleave',
+                'pointerover', 'pointerout', 'pointerenter', 'pointerleave', 'touchmove', 'drag', 'dragover',
+                'dragenter', 'dragleave', 'timeupdate', 'progress', 'loadeddata', 'loadedmetadata',
+                'loadstart', 'durationchange', 'canplay', 'canplaythrough', 'seeking', 'seeked', 'playing', 'waiting',
+                'stalled', 'suspend', 'emptied', 'ratechange', 'volumechange', 'animationstart', 'animationend',
+                'animationiteration', 'animationcancel', 'transitionstart', 'transitionend', 'transitionrun',
+                'transitioncancel', 'devicemotion', 'deviceorientation', 'deviceorientationabsolute', 'beforeinput',
+                'gamepadconnected', 'gamepaddisconnected'
+            ]
+        }
+    };
+    const TYPE_GROUP = {};
+    Object.keys(NOISE_GROUPS).forEach(g => NOISE_GROUPS[g].types.forEach(t => { TYPE_GROUP[t] = g; }));
+    // true, если событие относится к выключенной группе шума
+    const noiseOff = type => { const g = TYPE_GROUP[type]; return !!g && !S.noise[g]; };
+
+    // «Клик в никуда»: цель не интерактивна (нет ссылки/кнопки/поля/обработчика, курсор не pointer)
+    const EMPTY_CLICK_TYPES = new Set(['click', 'dblclick', 'auxclick']);
+    const INTERACTIVE = 'a[href],button,input,select,textarea,label,summary,option,video,audio,'
+        + '[role=button],[role=link],[role=menuitem],[role=tab],[role=checkbox],[role=switch],[role=option],'
+        + '[onclick],[tabindex]:not([tabindex="-1"]),[contenteditable=""],[contenteditable=true]';
+    function isEmptyClick(t) {
+        if (!(t instanceof Element)) return true;
+        try {
+            if (t.closest(INTERACTIVE)) return false;
+            return getComputedStyle(t).cursor !== 'pointer'; // cursor наследуется от родителей
+        } catch (e) { return false; }
+    }
     const NEVER = new Set(['unload']); // вызывает предупреждения Permissions-Policy
     const THROTTLED = new Set(['scroll', 'wheel', 'resize']);
     const STATE_TRIGGERS = new Set(['click', 'dblclick', 'change', 'submit', 'input', 'paste', 'drop', 'contextmenu']);
@@ -522,6 +556,8 @@
     function onEvent(e) {
         const t = e.target;
         if (isOwnUi(t)) return;
+        if (noiseOff(e.type)) return;
+        if (!S.noise.emptyClick && EMPTY_CLICK_TYPES.has(e.type) && isEmptyClick(t)) return;
         if (e.type === 'load' && t !== window && t !== document) return; // load ресурсов — шум
         if (THROTTLED.has(e.type)) {
             const n = performance.now();
@@ -535,7 +571,7 @@
 
     function attachEventListeners() {
         discoverEventNames().forEach(name => {
-            if (NOISY.has(name) && !S.includeNoisy) return;
+            if (noiseOff(name)) return;
             if (listened.has(name)) return;
             listened.add(name);
             window.addEventListener(name, onEvent, { capture: true, passive: true });
@@ -548,7 +584,7 @@
         const od = EventTarget.prototype.dispatchEvent;
         EventTarget.prototype.dispatchEvent = function (ev) {
             try {
-                if (ev && !listened.has(ev.type) && !isOwnUi(this)) {
+                if (ev && !listened.has(ev.type) && !noiseOff(ev.type) && !isOwnUi(this)) {
                     S.events.push({
                         seq: nextSeq(), timestamp: now(), type: ev.type, source: 'dispatchEvent',
                         isTrusted: false, target: describeTarget(this),
@@ -619,7 +655,8 @@
                 referrer: document.referrer, userAgent: navigator.userAgent, language: navigator.language,
                 timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
                 viewport: { w: innerWidth, h: innerHeight }, screen: { w: screen.width, h: screen.height },
-                counts: { network: S.network.length, events: S.events.length, state: S.state.length }
+                counts: { network: S.network.length, events: S.events.length, state: S.state.length },
+                noiseGroupsRecorded: S.noise // false = события этой группы НЕ записывались (см. NOISE_GROUPS)
             },
             timeline
         };
@@ -780,7 +817,7 @@
         S.depsCount = files.length;
         render();
         download(`fullsitelist_${location.hostname}_${stamp()}.txt`, out, 'text/plain');
-        console.log(`[WebScrabberFull] fullsitelist: ${files.length} файлов, ошибок: ${failed.length}, неподтвержденных догадок: ${guessMisses}`);
+        clog(`[WebScrabberFull] fullsitelist: ${files.length} файлов, ошибок: ${failed.length}, неподтвержденных догадок: ${guessMisses}`);
     }
 
     // ------------------------------------------------------------------ панель управления
@@ -815,8 +852,13 @@
             #${OWN_UI_ID} button.sf-danger{background:#7a2f2f}
             #${OWN_UI_ID} .sf-badge{background:rgba(255,255,255,.22);border-radius:10px;padding:0 8px;min-width:24px;text-align:center}
             #${OWN_UI_ID} label{display:flex;gap:6px;align-items:center;margin:2px 0 4px;cursor:pointer;color:#c9cdd8}
+            #${OWN_UI_ID} details{margin:0 0 6px 4px;padding-left:8px;border-left:2px solid #3a3f4b}
+            #${OWN_UI_ID} summary{cursor:pointer;color:#c9cdd8;margin-bottom:4px}
             #${OWN_UI_ID} .sf-body.sf-hidden{display:none}`;
         document.head.appendChild(style);
+
+        const noiseHtml = Object.keys(NOISE_GROUPS).map(k =>
+            `<label><input type="checkbox" data-n="${k}"> ${NOISE_GROUPS[k].label}</label>`).join('');
 
         const p = document.createElement('div');
         p.id = OWN_UI_ID;
@@ -825,12 +867,13 @@
             <div class="sf-body">
                 <button data-a="net">💾 Логи сети <span class="sf-badge" data-c="net">0</span></button>
                 <button data-a="evt">💾 Логи событий <span class="sf-badge" data-c="evt">0</span></button>
+                <details><summary>Шумные события (все выкл.)</summary>${noiseHtml}</details>
                 <button data-a="st" class="sf-alt">💾 Cookies / storage <span class="sf-badge" data-c="st">0</span></button>
                 <button data-a="dep">🌐 Скачать зависимости <span class="sf-badge" data-c="dep">0</span></button>
                 <label><input type="checkbox" data-o="includeCss"> включать CSS в зависимости</label>
                 <button data-a="all" class="sf-alt">📦 Всё в один JSON</button>
                 <label><input type="checkbox" data-o="snapshotInRequests" checked> cookies/storage в каждый запрос</label>
-                <label><input type="checkbox" data-o="includeNoisy"> шумные события (mousemove…)</label>
+                <label><input type="checkbox" data-o="consoleLog" checked> лог в консоль браузера</label>
                 <button data-a="clear" class="sf-danger">🗑 Очистить</button>
             </div>`;
         document.body.appendChild(p);
@@ -851,10 +894,15 @@
             if (b) actions[b.dataset.a]();
         });
         p.addEventListener('change', e => {
-            const o = e.target.dataset && e.target.dataset.o;
-            if (!o) return;
-            S[o] = e.target.checked;
-            if (o === 'includeNoisy') attachEventListeners(); // дописать шумные слушатели
+            const ds = e.target.dataset || {};
+            if (ds.n) {                                  // галочка группы шумных событий
+                S.noise[ds.n] = e.target.checked;
+                attachEventListeners();                  // дописать слушатели для включённых групп
+                const on = Object.keys(S.noise).filter(k => S.noise[k]).length;
+                p.querySelector('summary').textContent = on ? `Шумные события (вкл.: ${on})` : 'Шумные события (все выкл.)';
+            } else if (ds.o) {
+                S[ds.o] = e.target.checked;
+            }
         });
         p.querySelector('.sf-title').addEventListener('click', () => {
             const body = p.querySelector('.sf-body');
@@ -871,5 +919,5 @@
         state: S, downloadNetworkLogs, downloadEventLogs, downloadStateLogs,
         collectDeps, downloadFullSession, clearAll
     };
-    console.log('[WebScrabberFull] запущен');
+    clog('[WebScrabberFull] запущен');
 })();
