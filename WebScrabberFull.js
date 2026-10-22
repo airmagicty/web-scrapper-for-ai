@@ -2,7 +2,7 @@
 // @name         Web Scrabber [Full Version]
 // @description  Advanced client-side activity logger (Network, Events, Storage State) and recursive script dependency crawler.
 // @author       airmagicty
-// @version      2.1.0
+// @version      2.2.0
 // @license      MIT
 // ==UserScript==
 
@@ -42,6 +42,7 @@
         depsCount: 0,
         crawling: false,
         includeCss: false,         // галочка: собирать CSS
+        includeLibraries: false,   // галочка: включать популярные библиотеки/CDN
         snapshotInRequests: true,  // галочка: cookies/storage в каждый сетевой запрос
         consoleLog: true,          // галочка: дублировать лог в консоль браузера
         // группы шумных событий: true = записывать. По умолчанию все выключены
@@ -971,6 +972,37 @@
         return out;
     }
 
+    // Популярные библиотеки и CDN считаются внешним шумом по умолчанию.
+    // При включении includeLibraries они снова попадают в выгрузку.
+    function isPopularLibraryUrl(rawUrl) {
+        try {
+            const u = new URL(rawUrl, location.href);
+            const host = u.hostname.toLowerCase().replace(/^www\./, '');
+            const path = u.pathname.toLowerCase();
+            const cdnHosts = [
+                'fonts.googleapis.com', 'fonts.gstatic.com',
+                'ajax.googleapis.com', 'ajax.aspnetcdn.com',
+                'cdnjs.cloudflare.com', 'cdn.jsdelivr.net',
+                'unpkg.com', 'code.jquery.com', 'stackpath.bootstrapcdn.com',
+                'maxcdn.bootstrapcdn.com', 'use.fontawesome.com',
+                'kit.fontawesome.com', 'cdnjs.com'
+            ];
+            if (cdnHosts.some(h => host === h || host.endsWith('.' + h))) return true;
+
+            const libraryHosts = [
+                'jquery.com', 'getbootstrap.com', 'fontawesome.com',
+                'react.dev', 'reactjs.org', 'vuejs.org'
+            ];
+            if (libraryHosts.some(h => host === h || host.endsWith('.' + h))) return true;
+
+            // Часто библиотеки размещены на собственном домене сайта или в локальном каталоге.
+            return /(?:^|\/)(?:jquery(?:[-.]|\/)|bootstrap(?:[-.]|\/)|popper(?:[-.]|\/)|fontawesome(?:[-.]|\/)|font-awesome(?:[-.]|\/)|lodash(?:[-.]|\/)|moment(?:[-.]|\/)|dayjs(?:[-.]|\/)|axios(?:[-.]|\/)|react(?:[-.]|\/)|react-dom(?:[-.]|\/)|vue(?:[-.]|\/)|angular(?:[-.]|\/)|swiper(?:[-.]|\/)|slick(?:[-.]|\/)|normalize(?:[-.]|\/)|tailwind(?:[-.]|\/))/.test(path)
+                || /(?:^|[?&])(?:family|libraries|library)=/i.test(u.search) && /fonts\.googleapis\.com$/.test(host);
+        } catch (e) {
+            return false;
+        }
+    }
+
     async function collectDeps() {
         if (S.crawling) return;
         if (!origFetch) { alert('fetch недоступен'); return; }
@@ -994,7 +1026,7 @@
             if (!guess && !/^(\.|\/|https?:)/.test(ref)) return;           // голые npm-имена модулей пропускаем
             if (guess && !/^(\.|\/|https?:)/.test(ref)) base = pageBase;   // webpack-подобные пути — от страницы
             const url = toUrl(ref, base);
-            if (!url || seen.has(url) || seen.size >= CFG.maxDepFiles) return;
+            if (!url || (!S.includeLibraries && isPopularLibraryUrl(url)) || seen.has(url) || seen.size >= CFG.maxDepFiles) return;
             seen.add(url);
             queue.push({ url, from, kind, guess });
         };
@@ -1143,6 +1175,7 @@
                 <button data-a="st" class="sf-alt">💾 Cookies / storage <span class="sf-badge" data-c="st">0</span></button>
                 <button data-a="dep">🌐 Скачать зависимости <span class="sf-badge" data-c="dep">0</span></button>
                 <label><input type="checkbox" data-o="includeCss"> включать CSS в зависимости</label>
+                <label><input type="checkbox" data-o="includeLibraries"> включать популярные библиотеки/CDN</label>
                 <button data-a="all" class="sf-alt">📦 Всё в один JSON</button>
                 <label><input type="checkbox" data-o="snapshotInRequests" checked> cookies/storage в каждый запрос</label>
                 <label><input type="checkbox" data-o="compact" checked> сжимать логи (шапка с повторами)</label>
