@@ -54,14 +54,18 @@ An advanced client-side monitoring toolkit designed for comprehensive debugging,
   * **DOM & User Events:** Intercepts clicks, keyboard inputs, form submissions, SPA history navigation (`pushState`/`replaceState`), window resizing, JS errors, and custom events.
   * **State Tracking:** Takes initial snapshots and tracks changes (`diffs`) in `document.cookie`, `localStorage`, `sessionStorage`, and `IndexedDB`.
   * **Security & Privacy:** Sensitive input fields (passwords, credit card numbers, one-time codes) are automatically masked.
-  * **Recursive Dependency Crawler:** Downloads page HTML, scripts, and optional CSS dependencies into a consolidated text file.
+  * **Recursive Dependency Crawler:** Downloads page HTML, scripts, and optional CSS dependencies into a consolidated text file. The output starts with `FILE0` — the full live DOM (`document.documentElement.outerHTML`, the same as copying `<html>` via *Edit as HTML* in the Inspector, with the scraper's own panel removed), followed by `FILE1`, `FILE2`, … (server HTML, inline scripts/styles, and fetched files).
+  * **Dependency noise options** (the collapsible *«Шум зависимостей»* block in the panel):
+    * *include CSS in dependencies* — off by default;
+    * *include popular libraries/CDN* — off by default;
+    * *include base64 content* — off by default. While off, base64 payloads (`data:...;base64,...` and long base64 string literals) are replaced with `BASE64CODESKIP` to keep the output free of noise.
   * **Unified Export:** Option to bundle all chronological activity into a single JSON file formatted for LLM analysis.
-  * **Floating Control Panel:** Fully featured UI panel to toggle features, inspect counters, and trigger exports.
+  * **Floating Control Panel:** Fully featured UI panel to toggle features, inspect counters, and trigger exports. The panel title and all console messages show the script version (`WebScrabberFull vX.X.X`, `[WebScrabberFull vX.X.X]`), defined by the `VERSION` constant at the top of the file.
 * **Header Information:**
   * **Name:** WebScrabberFull
   * **Description:** Advanced client-side activity logger (Network, Events, Storage State) and recursive script dependency crawler.
-  * **Author:** Developer
-  * **Version:** 1.0.0
+  * **Author:** airmagicty
+  * **Version:** 2.2.0
   * **License:** MIT
 
 ---
