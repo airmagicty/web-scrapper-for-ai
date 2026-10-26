@@ -22,8 +22,8 @@ All scripts in this repository include a standard UserScript-style header format
 // ==UserScript==
 // @name         WebScrabber / WebScrabberFull
 // @description  Brief overview of the tool's capabilities
-// @author       Developer
-// @version      1.0.0
+// @author       airmagicty
+// @version      2.3.1
 // @license      MIT
 // ==UserScript==
 ```

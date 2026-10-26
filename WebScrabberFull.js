@@ -2,7 +2,7 @@
 // @name         Web Scrabber [Full Version]
 // @description  Advanced client-side activity logger (Network, Events, Storage State) and recursive script dependency crawler.
 // @author       airmagicty
-// @version      2.3.0
+// @version      2.3.1
 // @license      MIT
 // ==UserScript==
 
@@ -43,6 +43,7 @@
         crawling: false,
         includeCss: false,         // галочка: собирать CSS
         includeLibraries: false,   // галочка: включать популярные библиотеки/CDN
+        includeBase64: false,      // галочка: включать содержимое base64 (выкл. = заменять на BASE64CODESKIP)
         snapshotInRequests: true,  // галочка: cookies/storage в каждый сетевой запрос
         consoleLog: true,          // галочка: дублировать лог в консоль браузера
         // группы шумных событий: true = записывать. По умолчанию все выключены
@@ -1003,6 +1004,21 @@
         }
     }
 
+    // Замена содержимого base64 (картинки, шрифты и т.п., вставленные прямо в код) на короткую метку.
+    //  1) data-URI:  ";base64,<данные>"  -> ";base64,BASE64CODESKIP"  (от 100 символов)
+    //  2) длинные строки-литералы из одних base64-символов (от 300 символов) -> "BASE64CODESKIP"
+    const B64_SKIP = 'BASE64CODESKIP';
+    const RE_B64_URI = /(;base64,)(?:[A-Za-z0-9+\/_\-=%]|\\\/){100,}/gi;
+    const RE_B64_STR = /(["'`])(?=[A-Za-z0-9+\/=]*[a-z])(?=[A-Za-z0-9+\/=]*[A-Z])[A-Za-z0-9+\/=]{300,}\1/g;
+    function skipBase64(text, counter) {
+        if (S.includeBase64 || !text) return text;
+        let n = 0;
+        text = text.replace(RE_B64_URI, (m, pre) => { n++; return pre + B64_SKIP; });
+        text = text.replace(RE_B64_STR, (m, q) => { n++; return q + B64_SKIP + q; });
+        if (counter) counter.n += n;
+        return text;
+    }
+
     // Полный «живой» HTML страницы — то же, что в Inspector: <html> → Edit as HTML → копировать всё.
     // Это DOM после выполнения JS (outerHTML корневого элемента). Собственная панель скрипта вырезается.
     function liveHtmlSnapshot() {
@@ -1025,9 +1041,11 @@
         S.depsCount = 0;
 
         // FILE0: снимок живого DOM на момент клика (до сетевых запросов обхода)
+        const b64 = { n: 0 };            // сколько base64-вставок заменено
         let liveHtml = '';
         try { liveHtml = liveHtmlSnapshot(); }
         catch (e) { liveHtml = document.documentElement.outerHTML; }
+        liveHtml = skipBase64(liveHtml, b64);
 
         const includeCss = S.includeCss;
         const files = [], failed = [], seen = new Set(), queue = [];
@@ -1057,6 +1075,7 @@
             const r = await origFetch(location.href, { credentials: 'include' });
             html = await r.text();
         } catch (e) { html = document.documentElement.outerHTML; }
+        html = skipBase64(html, b64);
         files.push({ label: pageBase.split('#')[0], content: html });
         seen.add(toUrl(pageBase, pageBase));
 
@@ -1109,7 +1128,7 @@
                 try {
                     const r = await origFetch(item.url, { credentials: 'include' });
                     if (!r.ok) throw new Error('HTTP ' + r.status);
-                    const text = await r.text();
+                    const text = skipBase64(await r.text(), b64);
                     files.push({ label: item.url, content: text });
                     const deps = item.kind === 'css' ? scanCss(text) : scanJs(text);
                     deps.forEach(d => enqueue(d.ref, item.url, item.url, d.kind, d.guess));
@@ -1138,7 +1157,7 @@
         S.depsCount = files.length;
         render();
         download(`fullsitelist_${location.hostname}_${stamp()}.txt`, out, 'text/plain');
-        clog(`[WebScrabberFull] fullsitelist: FILE0 (live DOM) + ${files.length} файлов, ошибок: ${failed.length}, неподтвержденных догадок: ${guessMisses}`);
+        clog(`[WebScrabberFull] fullsitelist: FILE0 (live DOM) + ${files.length} файлов, ошибок: ${failed.length}, неподтвержденных догадок: ${guessMisses}, base64 заменено: ${b64.n}`);
     }
 
     // ------------------------------------------------------------------ панель управления
@@ -1195,8 +1214,11 @@
                 <details data-d="evt"><summary>Шумные события (все выкл.)</summary>${noiseHtml}</details>
                 <button data-a="st" class="sf-alt">💾 Cookies / storage <span class="sf-badge" data-c="st">0</span></button>
                 <button data-a="dep">🌐 Скачать зависимости <span class="sf-badge" data-c="dep">0</span></button>
-                <label><input type="checkbox" data-o="includeCss"> включать CSS в зависимости</label>
-                <label><input type="checkbox" data-o="includeLibraries"> включать популярные библиотеки/CDN</label>
+                <details data-d="dep"><summary>Шум зависимостей</summary>
+                    <label><input type="checkbox" data-o="includeCss"> включать CSS в зависимости</label>
+                    <label><input type="checkbox" data-o="includeLibraries"> включать популярные библиотеки/CDN</label>
+                    <label><input type="checkbox" data-o="includeBase64"> включать содержимое base64</label>
+                </details>
                 <button data-a="all" class="sf-alt">📦 Всё в один JSON</button>
                 <label><input type="checkbox" data-o="snapshotInRequests" checked> cookies/storage в каждый запрос</label>
                 <label><input type="checkbox" data-o="compact" checked> сжимать логи (шапка с повторами)</label>

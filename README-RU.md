@@ -22,8 +22,8 @@
 // ==UserScript==
 // @name         WebScrabber / WebScrabberFull
 // @description  Краткое описание возможностей скрипта
-// @author       Developer
-// @version      1.0.0
+// @author       airmagicty
+// @version      2.3.1
 // @license      MIT
 // ==UserScript==
 ```
