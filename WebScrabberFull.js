@@ -2,7 +2,7 @@
 // @name         Web Scrabber [Full Version]
 // @description  Advanced client-side activity logger (Network, Events, Storage State) and recursive script dependency crawler.
 // @author       airmagicty
-// @version      2.2.0
+// @version      2.3.0
 // @license      MIT
 // ==UserScript==
 
@@ -1003,11 +1003,31 @@
         }
     }
 
+    // Полный «живой» HTML страницы — то же, что в Inspector: <html> → Edit as HTML → копировать всё.
+    // Это DOM после выполнения JS (outerHTML корневого элемента). Собственная панель скрипта вырезается.
+    function liveHtmlSnapshot() {
+        const clone = document.documentElement.cloneNode(true);
+        clone.querySelectorAll('#' + OWN_UI_ID + ',[data-sf-own]').forEach(n => n.remove());
+        const dt = document.doctype;
+        let doctype = '';
+        if (dt) {
+            doctype = '<!DOCTYPE ' + dt.name
+                + (dt.publicId ? ' PUBLIC "' + dt.publicId + '"' : (dt.systemId ? ' SYSTEM' : ''))
+                + (dt.systemId ? ' "' + dt.systemId + '"' : '') + '>\n';
+        }
+        return doctype + clone.outerHTML;
+    }
+
     async function collectDeps() {
         if (S.crawling) return;
         if (!origFetch) { alert('fetch недоступен'); return; }
         S.crawling = true;
         S.depsCount = 0;
+
+        // FILE0: снимок живого DOM на момент клика (до сетевых запросов обхода)
+        let liveHtml = '';
+        try { liveHtml = liveHtmlSnapshot(); }
+        catch (e) { liveHtml = document.documentElement.outerHTML; }
 
         const includeCss = S.includeCss;
         const files = [], failed = [], seen = new Set(), queue = [];
@@ -1110,7 +1130,7 @@
         }
 
         // 6) сборка итогового файла: FILE1 [url]: ...
-        let out = '';
+        let out = `FILE0 [${pageBase.split('#')[0]} — live DOM: document.documentElement.outerHTML]:\n${liveHtml}\n\n`;
         files.forEach((f, i) => { out += `FILE${i + 1} [${f.label}]:\n${f.content}\n\n`; });
         if (failed.length) {
             out += 'NOT DOWNLOADED:\n' + failed.map(f => `- [${f.url}] (${f.reason}; from ${f.from})`).join('\n') + '\n';
@@ -1118,7 +1138,7 @@
         S.depsCount = files.length;
         render();
         download(`fullsitelist_${location.hostname}_${stamp()}.txt`, out, 'text/plain');
-        clog(`[WebScrabberFull] fullsitelist: ${files.length} файлов, ошибок: ${failed.length}, неподтвержденных догадок: ${guessMisses}`);
+        clog(`[WebScrabberFull] fullsitelist: FILE0 (live DOM) + ${files.length} файлов, ошибок: ${failed.length}, неподтвержденных догадок: ${guessMisses}`);
     }
 
     // ------------------------------------------------------------------ панель управления
@@ -1155,6 +1175,7 @@
             #${OWN_UI_ID} summary{cursor:pointer;color:#c9cdd8;margin-bottom:4px}
             #${OWN_UI_ID} .sf-legend{font-size:11px;color:#98a0b3;margin:-4px 0 8px}
             #${OWN_UI_ID} .sf-body.sf-hidden{display:none}`;
+        style.setAttribute('data-sf-own', '1');
         document.head.appendChild(style);
 
         const noiseHtml = Object.keys(NOISE_GROUPS).map(k =>
