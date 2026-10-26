@@ -2,7 +2,7 @@
 // @name         Web Scrabber [Full Version]
 // @description  Advanced client-side activity logger (Network, Events, Storage State) and recursive script dependency crawler.
 // @author       airmagicty
-// @version      2.3.1
+// @version      2.3.2
 // @license      MIT
 // ==UserScript==
 
@@ -18,8 +18,11 @@
 (function () {
     'use strict';
 
+    const VERSION = '2.3.2';   // версия скрипта (держать в синхроне с @version в шапке)
+    const TAG = `[WebScrabberFull v${VERSION}]`;   // префикс всех сообщений в консоли
+
     if (window.__webScrabberFull) {
-        console.warn('[WebScrabberFull] уже запущен на этой странице');
+        console.warn(`${TAG} уже запущен на этой странице`);
         return;
     }
 
@@ -349,7 +352,7 @@
             S.network.push(entry);
             S._netSig = sig;
         }
-        clog(`[WebScrabberFull][net] ${entry.method || ''} ${entry.url} -> ${entry.responseStatus ?? ''}`);
+        clog(`${TAG}[net] ${entry.method || ''} ${entry.url} -> ${entry.responseStatus ?? ''}`);
         scheduleRender();
     }
 
@@ -1157,7 +1160,7 @@
         S.depsCount = files.length;
         render();
         download(`fullsitelist_${location.hostname}_${stamp()}.txt`, out, 'text/plain');
-        clog(`[WebScrabberFull] fullsitelist: FILE0 (live DOM) + ${files.length} файлов, ошибок: ${failed.length}, неподтвержденных догадок: ${guessMisses}, base64 заменено: ${b64.n}`);
+        clog(`${TAG} fullsitelist: FILE0 (live DOM) + ${files.length} файлов, ошибок: ${failed.length}, неподтвержденных догадок: ${guessMisses}, base64 заменено: ${b64.n}`);
     }
 
     // ------------------------------------------------------------------ панель управления
@@ -1205,7 +1208,7 @@
         const p = document.createElement('div');
         p.id = OWN_UI_ID;
         p.innerHTML = `
-            <div class="sf-title"><span>WebScrabberFull</span><span class="sf-toggle">—</span></div>
+            <div class="sf-title"><span>WebScrabberFull v${VERSION}</span><span class="sf-toggle">—</span></div>
             <div class="sf-body">
                 <div class="sf-legend">счётчики: все / без повторов подряд</div>
                 <button data-a="net" title="всего запросов / записей без повторов подряд">💾 Логи сети <span class="sf-badge" data-c="net">0 / 0</span></button>
@@ -1274,5 +1277,5 @@
         state: S, downloadNetworkLogs, downloadEventLogs, downloadStateLogs,
         collectDeps, downloadFullSession, clearAll, buildExport, compactRecords
     };
-    clog('[WebScrabberFull] запущен');
+    clog(`${TAG} запущен`);
 })();
