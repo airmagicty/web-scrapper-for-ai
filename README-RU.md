@@ -23,7 +23,7 @@
 // @name         WebScrabber / WebScrabberFull
 // @description  Краткое описание возможностей скрипта
 // @author       airmagicty
-// @version      2.3.1
+// @version      2.X.X
 // @license      MIT
 // ==UserScript==
 ```
