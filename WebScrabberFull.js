@@ -2,7 +2,7 @@
 // @name         Web Scrabber [Full Version]
 // @description  Advanced client-side activity logger (Network, Events, Storage State) and recursive script dependency crawler.
 // @author       airmagicty
-// @version      2.3.2
+// @version      2.4.0
 // @license      MIT
 // ==UserScript==
 
@@ -18,7 +18,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '2.3.2';   // версия скрипта (держать в синхроне с @version в шапке)
+    const VERSION = '2.4.0';   // версия скрипта (держать в синхроне с @version в шапке)
     const TAG = `[WebScrabberFull v${VERSION}]`;   // префикс всех сообщений в консоли
 
     if (window.__webScrabberFull) {
@@ -49,6 +49,7 @@
         includeBase64: false,      // галочка: включать содержимое base64 (выкл. = заменять на BASE64CODESKIP)
         snapshotInRequests: true,  // галочка: cookies/storage в каждый сетевой запрос
         consoleLog: true,          // галочка: дублировать лог в консоль браузера
+        navigationGuard: true,     // галочка: остановить уход со страницы, чтобы сохранить логи
         // группы шумных событий: true = записывать. По умолчанию все выключены
         noise: { scroll: false, emptyClick: false, pointer: false, focus: false, select: false, keyLow: false, hover: false },
         // группы шумных сетевых запросов (трекеры, метрики): true = записывать. По умолчанию все выключены
@@ -1163,6 +1164,121 @@
         clog(`${TAG} fullsitelist: FILE0 (live DOM) + ${files.length} файлов, ошибок: ${failed.length}, неподтвержденных догадок: ${guessMisses}, base64 заменено: ${b64.n}`);
     }
 
+    // ------------------------------------------------------------------ защита логов при навигации
+    // Обычные ссылки / window.open откладываются до нажатия «Продолжить».
+    // Для location.href/assign/replace, form.submit(), reload и закрытия вкладки
+    // работает beforeunload: браузер покажет стандартное «Остаться / Покинуть».
+    // Программно вызвать скачивание внутри beforeunload надёжно нельзя.
+    const guard = { pending: null, bypass: false, overlay: null };
+    const nativeOpen = window.open;
+
+    function guardLog(type, details) {
+        pushEvent({ seq: nextSeq(), timestamp: now(), type,
+            source: 'navigationGuard', isTrusted: false,
+            target: { kind: 'navigation' }, pageUrl: location.href, ...details });
+    }
+
+    function guardHide() {
+        if (guard.overlay) guard.overlay.hidden = true;
+        guard.pending = null;
+    }
+
+    function guardShow(kind, destination, proceed) {
+        if (!S.navigationGuard || guard.bypass) { proceed(); return; }
+        guard.pending = { kind, destination, proceed };
+        guardLog('NAVIGATION_PAUSED', { kind, destination });
+        if (guard.overlay) {
+            guard.overlay.querySelector('[data-sf-destination]').textContent =
+                `${kind}: ${clip(String(destination), 300)}`;
+            guard.overlay.hidden = false;
+        }
+    }
+
+    // Browser-level fallback: covers reload, JS redirects, native form submits, tab close.
+    window.addEventListener('beforeunload', event => {
+        if (!S.navigationGuard || guard.bypass) return;
+        checkState('beforeunload');
+        guardLog('BEFORE_UNLOAD', { destination: '(browser-controlled)' });
+        event.preventDefault();
+        event.returnValue = ''; // стандартный диалог (текст задаёт браузер)
+    });
+
+    // Only intercept genuine user link clicks with normal navigation defaults.
+    // preventDefault does NOT stop click listeners / fetch / XHR triggered by the site.
+    window.addEventListener('click', event => {
+        if (!S.navigationGuard || guard.bypass || event.defaultPrevented ||
+            event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey ||
+            isOwnUi(event.target)) return;
+        const anchor = event.target instanceof Element ? event.target.closest('a[href]') : null;
+        if (!anchor || anchor.hasAttribute('download')) return;
+        const raw = anchor.getAttribute('href') || '';
+        if (!raw || /^(javascript:|mailto:|tel:|data:)/i.test(raw)) return;
+        let dest;
+        try { dest = new URL(raw, location.href); } catch (e) { return; }
+        if (!/^https?:$/.test(dest.protocol)) return;
+        const here = new URL(location.href);
+        if (dest.origin === here.origin && dest.pathname === here.pathname &&
+            dest.search === here.search && dest.hash !== here.hash) return;
+        const target = anchor.getAttribute('target') || '_self';
+        if (target !== '_self' && target !== '') return;
+        event.preventDefault();
+        // run after the site's remaining click listeners (so their network requests fire)
+        setTimeout(() => {
+            if (!S.navigationGuard) { guard.bypass = true; location.assign(dest.href); return; }
+            guardShow('Ссылка', dest.href, () => location.assign(dest.href));
+        }, 0);
+    }, true);
+
+    // Defer script-requested new tabs/windows instead of silently discarding them.
+    // Some browsers block the deferred open without a new user gesture; Continue is one.
+    window.open = function (...args) {
+        if (!S.navigationGuard || guard.bypass) return nativeOpen.apply(window, args);
+        const dest = args[0] == null ? 'about:blank' : String(args[0]);
+        guardShow('window.open', dest, () => nativeOpen.apply(window, args));
+        return null; // synchronous WindowProxy cannot be supplied after a pause
+    };
+
+    function guardContinue() {
+        const pending = guard.pending;
+        if (!pending) return;
+        guardHide();
+        guardLog('NAVIGATION_CONTINUED', { kind: pending.kind, destination: pending.destination });
+        checkState('navigation continued');
+        guard.bypass = true;
+        try { pending.proceed(); }
+        finally { setTimeout(() => { guard.bypass = false; }, 1000); }
+    }
+
+    function guardDownload() {
+        if (!guard.pending) return;
+        downloadFullSession();
+    }
+
+    function createGuardOverlay() {
+        const div = document.createElement('div');
+        div.id = '__sf_nav_guard';
+        div.setAttribute('data-sf-own', '1');
+        div.hidden = true;
+        div.innerHTML = `
+          <div class="sf-nav-card">
+            <strong>Переход приостановлен</strong>
+            <p>События и запросы, выполненные обработчиками клика, уже могли отправиться.
+               Перед уходом сохраните текущие логи.</p>
+            <p class="sf-nav-dest" data-sf-destination></p>
+            <button type="button" data-sf-nav="save">💾 Скачать полный JSON</button>
+            <button type="button" data-sf-nav="continue">Продолжить переход</button>
+            <button type="button" data-sf-nav="cancel">Отменить переход</button>
+          </div>`;
+        div.addEventListener('click', event => {
+            const action = event.target.closest('[data-sf-nav]')?.dataset.sfNav;
+            if (action === 'save') guardDownload();
+            if (action === 'continue') guardContinue();
+            if (action === 'cancel') { guardLog('NAVIGATION_CANCELLED', {}); guardHide(); }
+        });
+        document.body.appendChild(div);
+        guard.overlay = div;
+    }
+
     // ------------------------------------------------------------------ панель управления
 
     function scheduleRender() {
@@ -1196,7 +1312,17 @@
             #${OWN_UI_ID} details{margin:0 0 6px 4px;padding-left:8px;border-left:2px solid #3a3f4b}
             #${OWN_UI_ID} summary{cursor:pointer;color:#c9cdd8;margin-bottom:4px}
             #${OWN_UI_ID} .sf-legend{font-size:11px;color:#98a0b3;margin:-4px 0 8px}
-            #${OWN_UI_ID} .sf-body.sf-hidden{display:none}`;
+            #${OWN_UI_ID} .sf-body.sf-hidden{display:none}
+            #__sf_nav_guard[hidden]{display:none!important}
+            #__sf_nav_guard{position:fixed;inset:0;z-index:2147483646;display:grid;place-items:center;
+                background:rgba(0,0,0,.7);font:14px/1.45 system-ui,sans-serif;color:#e8eaf0}
+            #__sf_nav_guard .sf-nav-card{background:#1e2128;padding:22px;border-radius:12px;
+                width:min(440px,calc(100vw - 32px));box-shadow:0 12px 40px #0008}
+            #__sf_nav_guard p{margin:10px 0}
+            #__sf_nav_guard .sf-nav-dest{overflow-wrap:anywhere;color:#aeb9cd;font-size:12px}
+            #__sf_nav_guard button{padding:10px;border:0;border-radius:6px;margin:4px 5px 4px 0;
+                background:#2f6fed;color:white;cursor:pointer}
+            #__sf_nav_guard button:last-child{background:#515765}`;
         style.setAttribute('data-sf-own', '1');
         document.head.appendChild(style);
 
@@ -1226,9 +1352,11 @@
                 <label><input type="checkbox" data-o="snapshotInRequests" checked> cookies/storage в каждый запрос</label>
                 <label><input type="checkbox" data-o="compact" checked> сжимать логи (шапка с повторами)</label>
                 <label><input type="checkbox" data-o="consoleLog" checked> лог в консоль браузера</label>
+                <label><input type="checkbox" data-o="navigationGuard" checked> останавливать переходы со страницы</label>
                 <button data-a="clear" class="sf-danger">🗑 Очистить</button>
             </div>`;
         document.body.appendChild(p);
+        createGuardOverlay();
 
         ui.panel = p;
         ui.net = p.querySelector('[data-c=net]');
@@ -1260,6 +1388,7 @@
                 sum('net', S.noiseNet, 'Шум сети');
             } else if (ds.o) {
                 S[ds.o] = e.target.checked;
+                if (ds.o === 'navigationGuard' && !S.navigationGuard) guardHide();
             }
         });
         p.querySelector('.sf-title').addEventListener('click', () => {
@@ -1275,7 +1404,8 @@
 
     window.__webScrabberFull = {
         state: S, downloadNetworkLogs, downloadEventLogs, downloadStateLogs,
-        collectDeps, downloadFullSession, clearAll, buildExport, compactRecords
+        collectDeps, downloadFullSession, clearAll, buildExport, compactRecords,
+        navigationGuard: { continue: guardContinue, cancel: guardHide, download: guardDownload }
     };
     clog(`${TAG} запущен`);
 })();
