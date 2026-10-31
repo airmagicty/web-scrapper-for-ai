@@ -65,7 +65,7 @@ An advanced client-side monitoring toolkit designed for comprehensive debugging,
   * **Name:** WebScrabberFull
   * **Description:** Advanced client-side activity logger (Network, Events, Storage State) and recursive script dependency crawler.
   * **Author:** airmagicty
-  * **Version:** 2.2.0
+  * **Version:** 2.X.X
   * **License:** MIT
 
 ---
