@@ -2,7 +2,7 @@
 // @name         Web Scrabber [Full Version]
 // @description  Advanced client-side activity logger (Network, Events, Storage State) and recursive script dependency crawler.
 // @author       airmagicty
-// @version      2.4.0
+// @version      2.4.1
 // @license      MIT
 // ==UserScript==
 
@@ -18,7 +18,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '2.4.0';   // версия скрипта (держать в синхроне с @version в шапке)
+    const VERSION = '2.4.1';   // версия скрипта (держать в синхроне с @version в шапке)
     const TAG = `[WebScrabberFull v${VERSION}]`;   // префикс всех сообщений в консоли
 
     if (window.__webScrabberFull) {
@@ -49,7 +49,7 @@
         includeBase64: false,      // галочка: включать содержимое base64 (выкл. = заменять на BASE64CODESKIP)
         snapshotInRequests: true,  // галочка: cookies/storage в каждый сетевой запрос
         consoleLog: true,          // галочка: дублировать лог в консоль браузера
-        navigationGuard: true,     // галочка: остановить уход со страницы, чтобы сохранить логи
+        navigationGuard: false,    // галочка: остановить уход со страницы, чтобы сохранить логи
         // группы шумных событий: true = записывать. По умолчанию все выключены
         noise: { scroll: false, emptyClick: false, pointer: false, focus: false, select: false, keyLow: false, hover: false },
         // группы шумных сетевых запросов (трекеры, метрики): true = записывать. По умолчанию все выключены
@@ -1352,7 +1352,7 @@
                 <label><input type="checkbox" data-o="snapshotInRequests" checked> cookies/storage в каждый запрос</label>
                 <label><input type="checkbox" data-o="compact" checked> сжимать логи (шапка с повторами)</label>
                 <label><input type="checkbox" data-o="consoleLog" checked> лог в консоль браузера</label>
-                <label><input type="checkbox" data-o="navigationGuard" checked> останавливать переходы со страницы</label>
+                <label><input type="checkbox" data-o="navigationGuard"> останавливать переходы для сохранения логов</label>
                 <button data-a="clear" class="sf-danger">🗑 Очистить</button>
             </div>`;
         document.body.appendChild(p);
